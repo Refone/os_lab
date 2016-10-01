@@ -135,7 +135,7 @@ debuginfo_eip(uintptr_t addr, struct Eipdebuginfo *info)
 	// 'eip'.  First, we find the basic source file containing 'eip'.
 	// Then, we look in that source file for the function.  Then we look
 	// for the line number.
-	
+
 	// Search the entire set of stabs for the source file (type N_SO).
 	lfile = 0;
 	rfile = (stab_end - stabs) - 1;
@@ -179,7 +179,13 @@ debuginfo_eip(uintptr_t addr, struct Eipdebuginfo *info)
 	//	Look at the STABS documentation and <inc/stab.h> to find
 	//	which one.
 	// Your code here.
-
+	stab_binsearch(stabs, &lline, &rline, N_SLINE, addr);
+	if (lline<=rline) {
+		info->eip_line = stabs[lline].n_desc;
+	} else {
+		return -1;
+	}
+	
 	
 	// Search backwards from the line number for the relevant filename
 	// stab.
