@@ -192,6 +192,7 @@ cga_putc(int c)
 	}
 
 	// What is the purpose of this?
+	// change cursor position to the next line, and move all the contents displayed in the console a line above.
 	if (crt_pos >= CRT_SIZE) {
 		int i;
 
