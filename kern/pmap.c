@@ -20,7 +20,17 @@ struct Page *pages;		// Physical page state array
 static struct Page *page_free_list;	// Free list of physical pages
 static struct Page *chunk_list;
 
+struct Page *_p; 
+int _i; 
 
+#define CHECK_LIST(_phead, _n) cprintf(#_phead); \
+	cprintf(" check:\n"); \
+	_p = _phead; \
+	for (_i=0; _i<_n; _i++) { \
+		cprintf("%08x\n", _p); \
+		_p = _p->pp_link; \
+	} \
+	
 // --------------------------------------------------------------
 // Detect machine's physical memory setup.
 // --------------------------------------------------------------
@@ -103,12 +113,12 @@ boot_alloc(uint32_t n)
 	// to a multiple of PGSIZE.
 	//
 	// LAB 2: Your code here.
-	cprintf("nextfree:%08x ==>\n", nextfree);
-	cprintf("n:%d\n", n);	
-	cprintf("+n:%d\n", ((n/PGSIZE)*PGSIZE + (n%PGSIZE?1:0)*PGSIZE));
+	//cprintf("nextfree:%08x ==>\n", nextfree);
+	//cprintf("n:%d\n", n);	
+	//cprintf("+n:%d\n", ((n/PGSIZE)*PGSIZE + (n%PGSIZE?1:0)*PGSIZE));
 	result = nextfree;
 	nextfree += ((n/PGSIZE)*PGSIZE + (n%PGSIZE?1:0)*PGSIZE);
-	cprintf("nextfree:%08x\n", nextfree);
+	//cprintf("nextfree:%08x\n", nextfree);
 	return result;
 }
 
@@ -165,7 +175,7 @@ mem_init(void)
 
 	check_page_free_list(1);
 	check_page_alloc();
-	check_page();
+	//check_page();
 	check_n_pages();
 	check_realloc_npages();
 
@@ -259,26 +269,26 @@ page_init(void)
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
 	size_t i;
+	size_t l = IOPHYSMEM / PGSIZE;
+	size_t r = PADDR((unsigned int*)boot_alloc(0)) / PGSIZE;
+	
+	page_free_list = NULL;
+	//cprintf("l:%08x r:%08x\n", l*PGSIZE ,r*PGSIZE);
+	for (i = npages - 1; i > 0; i--) {
 		
-	//Mark physical page 0 as in use. 
-	pages[0].pp_ref = 0;
-	pages[0].pp_link = page_free_list;
-	page_free_list = &pages[0];
+		if ((i>=l)&&(i<r)) {
+			pages[i].pp_ref = 1;
+			continue;
+		}
 
-	//Mark the rest of base memory, [PGSIZE, npages_basemem * PGSIZE) as free. 
-	for (i = 1; i < npages; i++) {
 		pages[i].pp_ref = 0;
 		pages[i].pp_link = page_free_list;
 		page_free_list = &pages[i];
 	}
 	
-	//the IO hole [IOPHYSMEM, EXTPHYSMEM), which must never be allocated.
-	pages[EXTPHYSMEM / PGSIZE].pp_link = &pages[IOPHYSMEM / PGSIZE];
+	pages[0].pp_ref = 1;
+	pages[0].pp_link = NULL;
 
-	//physical memory [ULIM, 0xf0138000) cannot be allocated.
-	//cprintf("KERNBASE:%08x\n", KERNBASE);
-	pages[0xf0138000 / PGSIZE].pp_link = &pages[ULIM / PGSIZE];
-	
 	chunk_list = NULL;
 }
 
@@ -295,7 +305,21 @@ struct Page *
 page_alloc(int alloc_flags)
 {
 	// Fill this function in
-	return 0;
+	struct Page* result;
+
+	if (page_free_list) {
+		result = page_free_list;
+		page_free_list = page_free_list->pp_link;
+	} else {
+		return NULL;
+	}	
+
+	result->pp_link = NULL;
+	if (alloc_flags & ALLOC_ZERO) {
+		memset(page2kva(result), '\0', PGSIZE);
+	}
+	
+	return result;
 }
 
 //
@@ -317,7 +341,56 @@ struct Page *
 page_alloc_npages(int alloc_flags, int n)
 {
 	// Fill this function
-	return NULL;
+	struct Page *result;
+	struct Page *p, *pp;
+	int i;
+
+	if (n<=0) 
+		return NULL;
+	
+	if (check_continuous(page_free_list, n)) {
+		result = page_free_list;
+		for (i = 0; i < n; i++) {
+			page_free_list = page_free_list->pp_link;
+		}
+
+	} else {
+		//there's a DEFECT: if there doesn't exist enough continuous free page,
+		//the function check_countinuous() will also returns 0. but we canot distinguish
+		//whether it doesn't have enough pages, or just becouse the first n pages in
+		//page_free_list isn't continuous. that means, I
+		//still need to go through the list while it is meaningless. 
+		p = page_free_list;
+		while ( (p->pp_link)&&(!check_continuous(p->pp_link, n)) ) {
+			p = p->pp_link;
+		}
+		
+		//make sure there are enough continuous pages.
+		result = p->pp_link;
+		pp = result;
+		for (i = 0; i < n; i++) {
+			if (!pp) {
+				return NULL;
+			}
+			pp = pp->pp_link;
+		}
+
+		//update the page_free_list.
+		p->pp_link = pp;
+	}
+	
+	pp = result;
+	for (i = 0; i < n-1; i++) {
+		pp = pp->pp_link;
+	}
+	pp->pp_link = NULL;	
+
+	if (alloc_flags & ALLOC_ZERO) {
+		pp = result;
+		memset(page2kva(pp), '\0', PGSIZE*n);
+	}
+
+	return result;
 }
 
 // Return n continuous pages to chunk list. Do the following things:
@@ -329,7 +402,45 @@ int
 page_free_npages(struct Page *pp, int n)
 {
 	// Fill this function
-	return -1;
+	int i;
+	struct Page *p = pp;
+	struct Page *plist = page_free_list;
+
+	if (!check_continuous(pp, n)) 
+		return -1;
+	
+	if (p < page_free_list) {
+		//pp:[1]->[2]->[3] => page_free_list:[4]->[5]->[6]->...
+		//new page_free_list:[1]->[2]->[3]->[4]->[5]->[6]->...
+
+		for (i = 0; i < n-1; i++) {
+			//let p point to the last ele in the pp list
+			p->pp_ref = 0;		
+			p = p->pp_link;
+		}
+		
+		p->pp_link = page_free_list;
+		page_free_list = pp;
+	} else {
+		//pp:[4]->[5]->[6] => page_free_list:[1]->[2]->[8]->[9]->...
+		//    *p                    *plist
+		//
+		//new page_free_list:[1]->[2]->[4]->[5]->[6]->[8]->[9]->...
+		while ( (plist->pp_link) && (p > plist->pp_link) ) {
+			plist = plist->pp_link;
+		}
+
+		for (i = 0; i < n-1; i++) {
+			//let p point to the last ele in the pp list
+			p->pp_ref = 0;
+			p = p->pp_link;
+		}
+		
+		p->pp_link = plist->pp_link;
+		plist->pp_link = pp;
+	}
+
+	return 0;
 }
 
 //
@@ -340,6 +451,29 @@ void
 page_free(struct Page *pp)
 {
 	// Fill this function in
+	struct Page *p = page_free_list;
+
+	pp->pp_ref = 0;
+
+	//make page in page_free_list still in order.
+	if (!page_free_list) {
+		pp->pp_link = NULL;
+		page_free_list = pp;
+	} else if (pp < page_free_list) {
+		//pp:[1] => page_free_list: [3]->[4]->[5]->...
+		//new page_free_list: [1]->[3]->[4]->[5]->...
+		pp->pp_link = page_free_list;
+		page_free_list = pp;
+	} else {
+		//pp:[3] => page_free_list: [1]->[2]->[5]->...
+		//new page_free_list: [1]->[2]->[3]->[5]->...
+
+		while ( (p->pp_link) && (pp > p->pp_link) ) {
+			p = p->pp_link;
+		}
+		pp->pp_link = p->pp_link;
+		p->pp_link = pp;
+	}
 }
 
 //
@@ -351,7 +485,76 @@ struct Page *
 page_realloc_npages(struct Page *pp, int old_n, int new_n)
 {
 	// Fill this function
-	return NULL;
+	struct Page *p = pp;
+	struct Page *plist = page_free_list;
+	struct Page *tmp;
+	int i;
+
+	if (new_n == old_n) {
+		//old: [pp___] (return)
+		//new: [_____]
+		return pp;
+
+	} else if (new_n < old_n) {
+		//old: [pp___p____] (return)
+		//new: [______]
+		for (i = 0; i < new_n - 1; i++) {
+			p = p->pp_link;
+		}
+	
+		//page_free_npages must be successful
+		assert(!page_free_npages(p->pp_link, old_n - new_n)); 
+
+		p->pp_link = NULL;
+		return pp;
+
+	} else {
+		for (i = 0; i < old_n-1; i++) {
+			p = p->pp_link;
+		}//now p point to the last element of pp, and p->pp_link=NULL.
+		
+		if (check_continuous(p+1, new_n - old_n)) {
+			//old: [pp__p][123] (return)
+			//new: [__________]
+			if (plist == p+1) {			
+				//page_free_list: [123]-[]-[]-[]-[]
+				p->pp_link = page_alloc_npages(0, new_n - old_n);
+				return pp;
+
+			} else {
+				//page_free_list: []-[]-[plist]-[123]--[tmp->pp_link]
+				//								   tmp	
+
+				while (plist->pp_link && plist->pp_link!=(p+1)) {
+					plist = plist->pp_link;
+				}
+				
+				if (!plist->pp_link) {
+					//page(p+1) is not in free_page_list. 
+					goto realloc_3rd_way;
+				}
+				tmp = plist->pp_link;
+				for (i = 0; i < new_n - old_n -1; i++) {
+					tmp = tmp->pp_link;
+				}
+				p->pp_link = plist->pp_link;
+				plist->pp_link = tmp->pp_link;
+				tmp->pp_link = NULL;
+				return pp;
+			}			
+
+		} else {
+			//old: [pp___][###] (free it)
+			//new: [__________]
+			//*  : [p_________] (return)
+		realloc_3rd_way:
+			p = page_alloc_npages(0, new_n);
+			memmove(page2kva(p), page2kva(pp), old_n * PGSIZE);
+			page_free_npages(pp, old_n);
+			return p;
+		}
+
+	}
 }
 
 //
@@ -525,7 +728,7 @@ check_page_free_list(bool only_low_memory)
 		*tp[0] = pp2;
 		page_free_list = pp1;
 	}
-
+	
 	// if there's a page that shouldn't be on the free list,
 	// try to make sure it eventually causes trouble.
 	for (pp = page_free_list; pp; pp = pp->pp_link){
@@ -546,6 +749,9 @@ check_page_free_list(bool only_low_memory)
 		assert(page2pa(pp) != EXTPHYSMEM - PGSIZE);
 		assert(page2pa(pp) != EXTPHYSMEM);
 		assert(page2pa(pp) < EXTPHYSMEM || (char *) page2kva(pp) >= first_free_page);
+		//cprintf("EXTPHYSMEM:%08x\n", EXTPHYSMEM);
+		//cprintf("first_free_page:%08x\n", first_free_page);
+		//cprintf("page2pa(pp):%08x\n", page2pa(pp));
 
 		if (page2pa(pp) < EXTPHYSMEM)
 			++nfree_basemem;
@@ -569,7 +775,7 @@ check_page_alloc(void)
 	struct Page *fl;
 	char *c;
 	int i;
-
+	
 	if (!pages)
 		panic("'pages' is a null pointer!");
 
@@ -582,7 +788,7 @@ check_page_alloc(void)
 	assert((pp0 = page_alloc(0)));
 	assert((pp1 = page_alloc(0)));
 	assert((pp2 = page_alloc(0)));
-
+	
 	assert(pp0);
 	assert(pp1 && pp1 != pp0);
 	assert(pp2 && pp2 != pp1 && pp2 != pp0);
@@ -597,10 +803,11 @@ check_page_alloc(void)
 	// should be no free memory
 	assert(!page_alloc(0));
 
-	// free and re-allocate?
+	// free and re-allocate?	
 	page_free(pp0);
 	page_free(pp1);
 	page_free(pp2);
+
 	pp0 = pp1 = pp2 = 0;
 	assert((pp0 = page_alloc(0)));
 	assert((pp1 = page_alloc(0)));
@@ -882,7 +1089,6 @@ check_n_pages(void)
 	assert(pp != 0);
 	assert(pp0 != 0);
 	assert(pp != pp0);
-
 	
 	// Free pp and assign four continuous pages
 	page_free(pp);
@@ -944,7 +1150,7 @@ check_realloc_npages(void)
 	assert(check_continuous(pp, 4));
 
 	// Realloc to 6 pages
-	pp0 = page_realloc_npages(pp, 4, 6);
+	pp0 = page_realloc_npages(pp, 4, 6);	
 	assert(pp0 == pp);
 	assert(check_continuous(pp, 6));
 
